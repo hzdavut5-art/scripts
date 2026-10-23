@@ -12,6 +12,8 @@ local StarterGui = game:GetService('StarterGui')
 local Http = game:GetService('HttpService')
 local Teleport = game:GetService('TeleportService')
 local Chat = game:GetService('TextChatService')
+local TweenService = game:GetService('TweenService')
+local VirtualInput = game:GetService('VirtualInputManager')
 local me = Players.LocalPlayer
 assert(me, 'Run this script on the client.')
 local MAIN_PLACE_ID = 10266164381
@@ -28,6 +30,18 @@ local savedSpeed, flight, flightAttachment, savedAutoRotate
 local farmTarget, lastFarmScan, lastFarmClick = nil, -math.huge, -math.huge
 local farmClick = type(mouse1click) == 'function' and mouse1click or nil
 local farmHealthPaused, farmClickFailed = false, false
+local farmTween, farmTweenRoot, farmTweenTarget, farmTweenGoal
+local attackMode, keyHeld = 'Click', false
+local function cancelFarmTween()
+    if farmTween then farmTween:Cancel(); farmTween = nil end
+    farmTweenRoot, farmTweenTarget, farmTweenGoal = nil, nil, nil
+end
+local function releaseAttackKey()
+    if keyHeld then
+        pcall(function() VirtualInput:SendKeyEvent(false, Enum.KeyCode.E, false, game) end)
+        keyHeld = false
+    end
+end
 local spectating, danger = nil, false
 local original = {FogEnd = Lighting.FogEnd, Brightness = Lighting.Brightness,
     ClockTime = Lighting.ClockTime}
@@ -151,6 +165,8 @@ end
 local function cleanup()
     if not alive then return end
     alive = false
+    cancelFarmTween()
+    releaseAttackKey()
     for _, connection in ipairs(connections) do connection:Disconnect() end
     clearFlight()
     restoreCollisions()
@@ -258,15 +274,17 @@ connect(farmName.FocusLost, function()
     farmName.Text = farmName.Text:match('^%s*(.-)%s*$')
     farmTarget, lastFarmScan = nil, -math.huge
 end)
-toggle('farm', 'Mob farm: hover + repeated clicks', function(value)
+toggle('farm', 'Mob farm: hover + auto attack', function(value)
     if value then
-        assert(farmClick, 'Repeated attacks require the mouse1click function in your client environment.')
+        assert(attackMode ~= 'Click' or farmClick, 'Click mode requires mouse1click. Choose Tool or E-key mode if appropriate.')
         assert(not flags.fly, 'Disable Fly before enabling Mob Farm.')
         farmTarget, lastFarmScan, lastFarmClick = nil, -math.huge, -math.huge
         farmHealthPaused, farmClickFailed = false, false
-        notify('Farm enabled. Hide this menu with RightShift to allow attack clicks. Hovering does not guarantee protection.')
+        notify('Farm enabled. Hide the menu with RightShift to attack. Choose the correct attack mode for your weapon.')
     else
         farmTarget = nil
+        cancelFarmTween()
+        releaseAttackKey()
     end
 end)
 local farmHeight = numberField('Farm height above mob (studs)', 6, 0, 20)
@@ -274,6 +292,35 @@ local farmOffset = numberField('Farm distance behind mob (studs)', 2, 1, 10)
 local farmRange = numberField('Farm target search radius (studs)', 150, 10, 1000)
 local farmInterval = numberField('Attack click interval (seconds)', 0.4, 0.15, 3)
 local farmMinHealth = numberField('Pause farm below health percent', 20, 0, 99)
+local attackModeButton
+attackModeButton = button('Attack mode: Click', function()
+    releaseAttackKey()
+    attackMode = attackMode == 'Click' and 'Tool' or (attackMode == 'Tool' and 'E key' or 'Click')
+    farmClickFailed = false
+    attackModeButton.Text = 'Attack mode: ' .. attackMode
+end)
+toggle('farmTween', 'Tween travel to mobs', function() cancelFarmTween() end)
+local farmTweenSpeed = numberField('Tween travel speed (studs per second)', 150, 10, 500)
+toggle('farmNoclip', 'No clip while farming')
+toggle('farmUnmarked', 'Include unmarked bosses (exact name required)', function()
+    farmTarget = nil
+    cancelFarmTween()
+end)
+local function attackTarget()
+    if attackMode == 'Tool' then
+        local char = me.Character
+        local tool = char and char:FindFirstChildOfClass('Tool')
+        assert(tool, 'Equip a Tool, or select Click mode.')
+        tool:Activate()
+    elseif attackMode == 'E key' then
+        keyHeld = true
+        VirtualInput:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        task.delay(0.05, releaseAttackKey)
+    else
+        assert(farmClick, 'mouse1click is unavailable.')
+        farmClick()
+    end
+end
 local function combatMob(model)
     if not model or not model:IsA('Model') or not model:IsDescendantOf(workspace)
         or Players:GetPlayerFromCharacter(model) then return nil end
@@ -282,7 +329,9 @@ local function combatMob(model)
         if wanted == '' or model.Name:lower() ~= wanted then return nil end
     end
     local marker = model:FindFirstChild('NPC') or model:FindFirstChild('Npc')
-    if not marker or not marker:IsA('StringValue') or marker.Value ~= 'Combat' then return nil end
+    if marker and marker:IsA('StringValue') and marker.Value == 'Dialog' then return nil end
+    local markedCombat = marker and marker:IsA('StringValue') and marker.Value == 'Combat'
+    if not markedCombat and not (flags.farmUnmarked and flags.farmNameFilter) then return nil end
     local humanoid = model:FindFirstChildOfClass('Humanoid')
     local root = model:FindFirstChild('HumanoidRootPart') or model.PrimaryPart
     if humanoid and humanoid.Health > 0 and root and root:IsA('BasePart') then return root end
@@ -291,11 +340,13 @@ end
 local function updateFarm(root, humanoid)
     if not flags.farm or farmClickFailed or not root or not humanoid or humanoid.Health <= 0 then
         farmTarget = nil
+        cancelFarmTween()
         return
     end
     local healthPercent = humanoid.Health / math.max(humanoid.MaxHealth, 1) * 100
     if healthPercent < farmMinHealth() then
         farmTarget = nil
+        cancelFarmTween()
         if not farmHealthPaused then
             notify('Mob farm paused: low health. This does not move you to safety.')
             farmHealthPaused = true
@@ -307,6 +358,7 @@ local function updateFarm(root, humanoid)
     if targetRoot and (targetRoot.Position - root.Position).Magnitude > farmRange() then targetRoot = nil end
     if not targetRoot then
         farmTarget = nil
+        cancelFarmTween()
         if os.clock() - lastFarmScan < 0.5 then return end
         lastFarmScan = os.clock()
         local nearest = farmRange()
@@ -320,11 +372,27 @@ local function updateFarm(root, humanoid)
             end
         end
     end
-    if not targetRoot then return end
+    if not targetRoot then cancelFarmTween(); return end
     local position = (targetRoot.CFrame * CFrame.new(0, 0, farmOffset())).Position
         + Vector3.new(0, farmHeight(), 0)
     local facing = Vector3.new(targetRoot.Position.X, position.Y, targetRoot.Position.Z)
-    root.CFrame = CFrame.lookAt(position, facing)
+    local destination = CFrame.lookAt(position, facing)
+    local distance = (root.Position - position).Magnitude
+    if flags.farmTween and distance > 3 then
+        if farmTween and (farmTweenRoot ~= root or farmTweenTarget ~= farmTarget
+            or (farmTweenGoal - position).Magnitude > 10) then cancelFarmTween() end
+        if farmTween and farmTween.PlaybackState ~= Enum.PlaybackState.Playing then cancelFarmTween() end
+        if not farmTween then
+            farmTweenRoot, farmTweenTarget, farmTweenGoal = root, farmTarget, position
+            farmTween = TweenService:Create(root,
+                TweenInfo.new(math.max(distance / farmTweenSpeed(), 0.05), Enum.EasingStyle.Linear),
+                {CFrame = destination})
+            farmTween:Play()
+        end
+    else
+        cancelFarmTween()
+        root.CFrame = destination
+    end
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
 end
@@ -471,6 +539,9 @@ end)
 
 section('Game-specific actions')
 toggle('pickup', 'Auto pickup within 50 studs')
+toggle('touchPickup', 'Touch pickup for nearby drops / souls', function(value)
+    assert(not value or type(firetouchinterest) == 'function', 'Touch pickup requires firetouchinterest.')
+end)
 local itemName = field('Item name')
 button('Purchase one item (original Pay request)', function()
     assert(itemName.Text ~= '', 'Enter an item name.')
@@ -618,13 +689,15 @@ end)
 connect(Run.PreSimulation, function()
     local char, root, humanoid = character()
     updateFarm(root, humanoid)
-    if flags.noclip and char then
+    if (flags.noclip or (flags.farm and flags.farmNoclip)) and char then
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA('BasePart') then
                 if collisionCache[part] == nil then collisionCache[part] = part.CanCollide end
                 part.CanCollide = false
             end
         end
+    elseif next(collisionCache) then
+        restoreCollisions()
     end
     if flags.speed and humanoid then
         if not savedSpeed or savedSpeed[1] ~= humanoid then savedSpeed = {humanoid, humanoid.WalkSpeed} end
@@ -660,6 +733,7 @@ connect(Run.PreSimulation, function()
 end)
 local elapsed, discovery = 0, 0
 local pickupTimes = setmetatable({}, {__mode = 'k'})
+local touchTimes = setmetatable({}, {__mode = 'k'})
 connect(Run.Heartbeat, function(delta)
     elapsed, discovery = elapsed + delta, discovery + delta
     if elapsed < 0.25 then return end
@@ -667,14 +741,16 @@ connect(Run.Heartbeat, function(delta)
     local _, root = character()
     discoverPlayers()
     if flags.farm and not farmClickFailed and farmTarget and not farmHealthPaused and combatMob(farmTarget)
-        and root and not frame.Visible and not Input:GetFocusedTextBox()
+        and root and not farmTween and not frame.Visible and not Input:GetFocusedTextBox()
         and os.clock() - lastFarmClick >= farmInterval() then
         lastFarmClick = os.clock()
-        local ok, err = pcall(farmClick)
+        local ok, err = pcall(attackTarget)
         if not ok then
             farmClickFailed = true
             farmTarget = nil
-            notify('Mob farm paused: automatic clicking failed: ' .. tostring(err))
+            cancelFarmTween()
+            releaseAttackKey()
+            notify('Mob farm paused: attack failed: ' .. tostring(err))
         end
     end
     if discovery >= 2 then
@@ -711,6 +787,34 @@ connect(Run.Heartbeat, function(delta)
                     item.healthFill.Size = UDim2.fromScale(ratio, 1)
                     item.healthFill.BackgroundColor3 = Color3.fromRGB(235, 65, 65):Lerp(
                         Color3.fromRGB(70, 225, 110), ratio)
+                end
+            end
+        end
+    end
+    if flags.touchPickup and root then
+        local sent = 0
+        for _, drop in ipairs(workspace:GetChildren()) do
+            local lowerName = drop.Name:lower()
+            if drop:IsA('Tool') or lowerName:find('soul', 1, true) or lowerName:find('drop', 1, true) then
+                local part = drop:IsA('BasePart') and drop or drop:FindFirstChild('Handle')
+                    or drop:FindFirstChildWhichIsA('BasePart', true)
+                if part and part:IsA('BasePart') and (root.Position - part.Position).Magnitude <= 12
+                    and os.clock() - (touchTimes[drop] or -math.huge) >= 1 then
+                    touchTimes[drop] = os.clock()
+                    local touchRoot, touchPart = root, part
+                    local ok, err = pcall(function() firetouchinterest(touchRoot, touchPart, 0) end)
+                    if ok then
+                        task.delay(0.05, function()
+                            if touchRoot.Parent and touchPart.Parent then
+                                pcall(function() firetouchinterest(touchRoot, touchPart, 1) end)
+                            end
+                        end)
+                    else
+                        notify('Touch pickup failed: ' .. tostring(err))
+                        break
+                    end
+                    sent = sent + 1
+                    if sent >= 3 then break end
                 end
             end
         end
