@@ -253,25 +253,42 @@ end)
 toggle('time', 'Override time', function(value) if not value then Lighting.ClockTime = original.ClockTime end end)
 local clockTime = numberField('Time (0–24; morning 6.3, afternoon 14, evening 18)', 14, 0, 24)
 section('ESP')
+toggle('playerESP', 'Player names / locations')
+toggle('playerHealthESP', 'Show player health')
 toggle('npcESP', 'NPC names')
 toggle('mobESP', 'Mob names')
 toggle('areaESP', 'Area names')
 toggle('healthESP', 'Show mob health')
 toggle('distanceESP', 'Show distance')
 local maxDistance = numberField('ESP max distance', 10000, 100, 100000)
-local function espEntry(target, part, kind)
-    if esp[target] then return end
+local function espEntry(target, part, kind, player)
+    local existing = esp[target]
+    if existing then
+        if existing.part == part then return end
+        existing.gui:Destroy()
+        esp[target] = nil
+    end
     local billboard = new('BillboardGui', {Name = 'StandaloneESP', Adornee = part,
         Size = UDim2.fromOffset(240, 48), StudsOffset = Vector3.new(0, 3, 0),
         AlwaysOnTop = true, Enabled = false}, gui)
     local label = new('TextLabel', {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
         TextColor3 = kind == 'mobESP' and Color3.fromRGB(255, 140, 140) or Color3.fromRGB(150, 220, 255),
         TextStrokeTransparency = 0.3, Font = Enum.Font.GothamBold, TextSize = 13}, billboard)
-    esp[target] = {gui = billboard, label = label, part = part, kind = kind}
+    esp[target] = {gui = billboard, label = label, part = part, kind = kind, player = player}
+end
+local function discoverPlayers()
+    if not flags.playerESP then return end
+    for _, player in ipairs(Players:GetPlayers()) do
+        local model = player.Character
+        local part = model and (model:FindFirstChild('HumanoidRootPart') or model:FindFirstChild('Head'))
+        if player ~= me and model and model:IsDescendantOf(workspace) and part and part:IsA('BasePart') then
+            espEntry(model, part, 'playerESP', player)
+        end
+    end
 end
 local function discoverESP()
     for _, object in ipairs(workspace:GetChildren()) do
-        if object:IsA('Model') then
+        if object:IsA('Model') and not Players:GetPlayerFromCharacter(object) then
             local marker = object:FindFirstChild('NPC') or object:FindFirstChild('Npc')
             local part = object:FindFirstChild('HumanoidRootPart') or object:FindFirstChild('Main') or object.PrimaryPart
             if marker and part and part:IsA('BasePart') then
@@ -544,20 +561,33 @@ connect(Run.Heartbeat, function(delta)
     if elapsed < 0.25 then return end
     elapsed = 0
     local _, root = character()
+    discoverPlayers()
     if discovery >= 2 then
         discovery = 0
         if flags.npcESP or flags.mobESP or flags.areaESP then discoverESP() end
     end
     for object, item in pairs(esp) do
-        if not object:IsDescendantOf(workspace) or not item.part:IsDescendantOf(workspace) then
+        if not object:IsDescendantOf(workspace) or not item.part:IsDescendantOf(workspace)
+            or (item.player and (item.player.Parent ~= Players or item.player.Character ~= object)) then
             item.gui:Destroy(); esp[object] = nil
         else
             local distance = root and (root.Position - item.part.Position).Magnitude or math.huge
             item.gui.Enabled = flags[item.kind] and distance <= maxDistance()
             if item.gui.Enabled then
                 local text = object.Name
+                if item.player then
+                    local player = item.player
+                    text = player.DisplayName == player.Name and player.Name
+                        or (player.DisplayName .. ' (@' .. player.Name .. ')')
+                    item.label.TextColor3 = (not player.Neutral and player.Team)
+                        and player.TeamColor.Color or Color3.fromRGB(120, 235, 170)
+                end
                 local humanoid = object:FindFirstChildOfClass('Humanoid')
-                if flags.healthESP and item.kind == 'mobESP' and humanoid then text = text .. string.format(' [%d HP]', math.floor(humanoid.Health)) end
+                local showHealth = (item.kind == 'mobESP' and flags.healthESP)
+                    or (item.kind == 'playerESP' and flags.playerHealthESP)
+                if showHealth and humanoid then
+                    text = text .. string.format(' [%d/%d HP]', math.floor(humanoid.Health), math.floor(humanoid.MaxHealth))
+                end
                 if flags.distanceESP then text = text .. string.format(' [%d studs]', math.floor(distance)) end
                 item.label.Text = text
             end
