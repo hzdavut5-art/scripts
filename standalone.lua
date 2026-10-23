@@ -46,7 +46,7 @@ end
 local function notify(message)
     warn('[Standalone] ' .. tostring(message))
     pcall(function() StarterGui:SetCore('SendNotification', {
-        Title = 'Standalone Utility', Text = tostring(message), Duration = 5}) end)
+        Title = 'eishi is the king', Text = tostring(message), Duration = 5}) end)
 end
 local function character()
     local model = me.Character
@@ -88,7 +88,7 @@ local frame = new('Frame', {Size = UDim2.fromOffset(430, 530),
     Position = UDim2.new(0.5, -215, 0.5, -265),
     BackgroundColor3 = Color3.fromRGB(25, 27, 34), BorderSizePixel = 0}, gui)
 new('UICorner', {CornerRadius = UDim.new(0, 10)}, frame)
-local title = new('TextLabel', {Text = 'Standalone Utility  |  RightShift: hide',
+local title = new('TextLabel', {Text = 'eishi is the king  |  RightShift: hide',
     Size = UDim2.new(1, -45, 0, 42), BackgroundTransparency = 1,
     TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14}, frame)
 local close = new('TextButton', {Text = 'X', Size = UDim2.fromOffset(38, 34),
@@ -236,7 +236,7 @@ button('Remove local ForceField', function()
 end)
 button('Disconnect (blocked while danger flag is active)', function()
     if danger then notify('You are in danger.'); return end
-    me:Kick('Disconnected using Standalone Utility.')
+    me:Kick('Disconnected using eishi is the king.')
 end)
 
 section('Visuals')
