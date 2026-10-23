@@ -458,8 +458,8 @@ toggle('playerHealthESP', 'Show player health')
 toggle('npcESP', 'NPC names')
 toggle('mobESP', 'Mob names')
 toggle('areaESP', 'Area names')
-toggle('healthESP', 'Show NPC / mob health numbers')
-toggle('healthBarsESP', 'Show HP bars')
+toggle('healthESP', 'Show NPC / mob HP and percent')
+toggleControls.healthESP(true)
 toggle('distanceESP', 'Show distance')
 local maxDistance = numberField('ESP max distance', 10000, 100, 100000)
 local function espEntry(target, part, kind, player)
@@ -473,21 +473,12 @@ local function espEntry(target, part, kind, player)
         esp[target] = nil
     end
     local billboard = new('BillboardGui', {Name = 'StandaloneESP', Adornee = part,
-        Size = UDim2.fromOffset(240, 64), StudsOffset = Vector3.new(0, 3, 0),
+        Size = UDim2.fromOffset(280, 48), StudsOffset = Vector3.new(0, 3, 0),
         AlwaysOnTop = true, Enabled = false}, gui)
     local label = new('TextLabel', {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
         TextColor3 = kind == 'mobESP' and Color3.fromRGB(255, 140, 140) or Color3.fromRGB(150, 220, 255),
         TextStrokeTransparency = 0.3, Font = Enum.Font.GothamBold, TextSize = 13}, billboard)
-    label.Size = UDim2.new(1, 0, 1, -12)
-    local healthBack = new('Frame', {Name = 'HealthBar', Size = UDim2.fromOffset(132, 7),
-        Position = UDim2.new(0.5, -66, 1, -10), BackgroundColor3 = Color3.fromRGB(35, 35, 40),
-        BorderSizePixel = 0, Visible = false, ClipsDescendants = true}, billboard)
-    new('UICorner', {CornerRadius = UDim.new(0, 3)}, healthBack)
-    local healthFill = new('Frame', {Name = 'Fill', Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Color3.fromRGB(80, 220, 100), BorderSizePixel = 0}, healthBack)
-    new('UICorner', {CornerRadius = UDim.new(0, 3)}, healthFill)
-    esp[target] = {gui = billboard, label = label, part = part, kind = kind, player = player,
-        healthBack = healthBack, healthFill = healthFill}
+    esp[target] = {gui = billboard, label = label, part = part, kind = kind, player = player}
 end
 local function discoverPlayers()
     if not flags.playerESP then return end
@@ -837,17 +828,14 @@ connect(Run.Heartbeat, function(delta)
                 local showHealth = ((item.kind == 'mobESP' or item.kind == 'npcESP') and flags.healthESP)
                     or (item.kind == 'playerESP' and flags.playerHealthESP)
                 if showHealth and humanoid then
-                    text = text .. string.format(' [%d/%d HP]', math.floor(humanoid.Health), math.floor(humanoid.MaxHealth))
+                    local remaining = math.max(humanoid.Health, 0)
+                    local maximum = math.max(humanoid.MaxHealth, 0)
+                    local percent = maximum > 0 and math.clamp(remaining / maximum * 100, 0, 100) or 0
+                    text = text .. string.format(' [%d/%d HP | %.0f%%]', math.floor(remaining), math.floor(maximum), percent)
                 end
                 if flags.distanceESP then text = text .. string.format(' [%d studs]', math.floor(distance)) end
                 item.label.Text = text
-                item.healthBack.Visible = flags.healthBarsESP and humanoid ~= nil
-                if item.healthBack.Visible then
-                    local ratio = math.clamp(humanoid.Health / math.max(humanoid.MaxHealth, 1), 0, 1)
-                    item.healthFill.Size = UDim2.fromScale(ratio, 1)
-                    item.healthFill.BackgroundColor3 = Color3.fromRGB(235, 65, 65):Lerp(
-                        Color3.fromRGB(70, 225, 110), ratio)
-                end
+
             end
         end
     end
