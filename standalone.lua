@@ -27,6 +27,7 @@ local alive = true
 local connections, instances = {}, {}
 local flags, collisionCache, killCache, esp = {}, {}, {}, {}
 local savedSpeed, flight, flightAttachment, savedAutoRotate
+local softLanding = false
 local farmTarget, lastFarmScan, lastFarmClick = nil, -math.huge, -math.huge
 local farmClick = type(mouse1click) == 'function' and mouse1click or nil
 local farmHealthPaused, farmClickFailed = false, false
@@ -78,6 +79,7 @@ local function fire(...)
     dataEvent:FireServer(...)
 end
 local function clearFlight()
+    softLanding = false
     if flight then flight:Destroy(); flight = nil end
     if flightAttachment then flightAttachment:Destroy(); flightAttachment = nil end
     if savedAutoRotate then
@@ -105,7 +107,7 @@ local frame = new('Frame', {Size = UDim2.fromOffset(430, 530),
     Position = UDim2.new(0.5, -215, 0.5, -265),
     BackgroundColor3 = Color3.fromRGB(25, 27, 34), BorderSizePixel = 0}, gui)
 new('UICorner', {CornerRadius = UDim.new(0, 10)}, frame)
-local title = new('TextLabel', {Text = 'eishi is the king  |  RightShift: hide',
+local title = new('TextLabel', {Text = 'eishi is the king  |  F1 Fly / F2 Noclip',
     Size = UDim2.new(1, -45, 0, 42), BackgroundTransparency = 1,
     TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14}, frame)
 local close = new('TextButton', {Text = 'X', Size = UDim2.fromOffset(38, 34),
@@ -137,16 +139,22 @@ local function button(text, callback)
     end)
     return object
 end
+local toggleControls = {}
 local function toggle(key, label, callback)
     flags[key] = false
     local object
-    object = button('[OFF] ' .. label, function()
-        local desired = not flags[key]
+    local function set(desired)
+        if not alive then return false end
+        if flags[key] == desired then return true end
         if callback then callback(desired) end
         flags[key] = desired
         object.Text = (desired and '[ON] ' or '[OFF] ') .. label
         object.TextColor3 = desired and Color3.fromRGB(120, 235, 170) or Color3.fromRGB(235, 238, 245)
-    end)
+        return true
+    end
+    object = button('[OFF] ' .. label, function() set(not flags[key]) end)
+    toggleControls[key] = set
+    return object
 end
 local function field(label, default)
     local object = row('TextBox', tostring(default or ''))
@@ -203,11 +211,25 @@ connect(Input.InputChanged, function(input)
 end)
 
 section('Movement')
-toggle('fly', 'Fly (WASD, Space up, Ctrl down)', function(value)
+toggle('fly', 'Fly [F1] (WASD, Space up, Ctrl down)', function(value)
     assert(not value or not flags.farm, 'Disable Mob Farm before enabling Fly.')
-    if not value then clearFlight() end
+    if value then
+        softLanding = false
+        local _, root = character()
+        if root then root.AssemblyLinearVelocity = Vector3.zero end
+    elseif flight and flight.Parent and not flags.farm then
+        -- Landing needs floor collisions even if noclip was enabled during flight.
+        if toggleControls.noclip then toggleControls.noclip(false) end
+        if flags.farmNoclip and toggleControls.farmNoclip then toggleControls.farmNoclip(false) end
+        restoreCollisions()
+        softLanding = true
+        notify('Fly off: descending gently. F1 resumes flight.')
+    else
+        clearFlight()
+    end
 end)
 local flySpeed = numberField('Fly speed', 60, 0, 500)
+local descentLimit = numberField('Maximum flight descent speed', 20, 5, 40)
 toggle('speed', 'Custom walk speed', function(value)
     if not value and savedSpeed then
         if savedSpeed[1].Parent then savedSpeed[1].WalkSpeed = savedSpeed[2] end
@@ -215,7 +237,27 @@ toggle('speed', 'Custom walk speed', function(value)
     end
 end)
 local moveSpeed = numberField('Walk speed', 32, 0, 500)
-toggle('noclip', 'No clip', function(value) if not value then restoreCollisions() end end)
+toggle('noclip', 'No clip [F2]', function(value)
+    if not value then
+        if flags.farmNoclip and toggleControls.farmNoclip then toggleControls.farmNoclip(false) end
+        restoreCollisions()
+    end
+end)
+connect(Input.InputBegan, function(input)
+    if Input:GetFocusedTextBox() then return end
+    local key = input.KeyCode == Enum.KeyCode.F1 and 'fly'
+        or (input.KeyCode == Enum.KeyCode.F2 and 'noclip' or nil)
+    if key then
+        -- F2 must also switch off the farm's optional collision override.
+        local desired = key == 'noclip' and not (flags.noclip or (flags.farm and flags.farmNoclip))
+            or (key == 'fly' and not flags.fly)
+        if key == 'noclip' and not desired and flags.farmNoclip and toggleControls.farmNoclip then
+            toggleControls.farmNoclip(false)
+        end
+        local ok, err = pcall(toggleControls[key], desired)
+        if not ok then notify(err) end
+    end
+end)
 local function trackKill(part)
     if flags.noKill and (part.Name == 'Void' or part.Name == 'LavarossaVoid') and part:IsA('BasePart') and not killCache[part] then
         killCache[part] = part.Parent
@@ -277,7 +319,7 @@ end)
 toggle('farm', 'Mob farm: hover + auto attack', function(value)
     if value then
         assert(attackMode ~= 'Click' or farmClick, 'Click mode requires mouse1click. Choose Tool or E-key mode if appropriate.')
-        assert(not flags.fly, 'Disable Fly before enabling Mob Farm.')
+        assert(not flags.fly and not softLanding, 'Finish landing or disable Fly before enabling Mob Farm.')
         farmTarget, lastFarmScan, lastFarmClick = nil, -math.huge, -math.huge
         farmHealthPaused, farmClickFailed = false, false
         notify('Farm enabled. Hide the menu with RightShift to attack. Choose the correct attack mode for your weapon.')
@@ -703,7 +745,7 @@ connect(Run.PreSimulation, function()
         if not savedSpeed or savedSpeed[1] ~= humanoid then savedSpeed = {humanoid, humanoid.WalkSpeed} end
         humanoid.WalkSpeed = moveSpeed()
     end
-    if flags.fly and root and humanoid then
+    if (flags.fly or softLanding) and root and humanoid and humanoid.Health > 0 then
         if not flight or flight.Parent ~= root then
             clearFlight()
             savedAutoRotate = {humanoid, humanoid.AutoRotate}
@@ -724,8 +766,26 @@ connect(Run.PreSimulation, function()
             if Input:IsKeyDown(Enum.KeyCode.LeftControl) then direction = direction - Vector3.yAxis end
         end
         if direction.Magnitude > 1 then direction = direction.Unit end
-        flight.VectorVelocity = direction * flySpeed()
-    elseif flight then clearFlight() end
+        local velocity = direction * flySpeed()
+        if softLanding then
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = {me.Character}
+            params.RespectCanCollide = true
+            local groundDistance = math.max(humanoid.HipHeight + root.Size.Y * 0.5 + 0.6, 3)
+            local ground = workspace:Raycast(root.Position, Vector3.new(0, -groundDistance, 0), params)
+            if ground then
+                root.AssemblyLinearVelocity = Vector3.zero
+                clearFlight()
+            else
+                local lateral = humanoid.MoveDirection * math.min(flySpeed(), 16)
+                flight.VectorVelocity = Vector3.new(lateral.X, -math.min(descentLimit(), 12), lateral.Z)
+            end
+        else
+            -- Limit downward velocity while retaining the chosen horizontal speed.
+            flight.VectorVelocity = Vector3.new(velocity.X, math.max(velocity.Y, -descentLimit()), velocity.Z)
+        end
+    elseif flight or softLanding then clearFlight() end
     if flags.fog then Lighting.FogEnd = 1e9 end
     if flags.bright then Lighting.Brightness = brightness() end
     if flags.time then Lighting.ClockTime = clockTime() end
@@ -834,6 +894,6 @@ connect(Run.Heartbeat, function(delta)
         end
     end
 end)
-notify('Loaded. RightShift hides the menu; X unloads and restores tracked changes.')
+notify('Loaded. F1: fly, F2: noclip, RightShift: menu. Fly off starts gentle landing; X unloads immediately.')
 if game.PlaceId ~= MAIN_PLACE_ID then notify('Different place: game-specific actions may be unavailable.') end
 
