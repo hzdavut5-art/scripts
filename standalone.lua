@@ -25,6 +25,9 @@ local alive = true
 local connections, instances = {}, {}
 local flags, collisionCache, killCache, esp = {}, {}, {}, {}
 local savedSpeed, flight, flightAttachment, savedAutoRotate
+local farmTarget, lastFarmScan, lastFarmClick = nil, -math.huge, -math.huge
+local farmClick = type(mouse1click) == 'function' and mouse1click or nil
+local farmHealthPaused, farmClickFailed = false, false
 local spectating, danger = nil, false
 local original = {FogEnd = Lighting.FogEnd, Brightness = Lighting.Brightness,
     ClockTime = Lighting.ClockTime}
@@ -184,7 +187,10 @@ connect(Input.InputChanged, function(input)
 end)
 
 section('Movement')
-toggle('fly', 'Fly (WASD, Space up, Ctrl down)', function(value) if not value then clearFlight() end end)
+toggle('fly', 'Fly (WASD, Space up, Ctrl down)', function(value)
+    assert(not value or not flags.farm, 'Disable Mob Farm before enabling Fly.')
+    if not value then clearFlight() end
+end)
 local flySpeed = numberField('Fly speed', 60, 0, 500)
 toggle('speed', 'Custom walk speed', function(value)
     if not value and savedSpeed then
@@ -238,6 +244,74 @@ button('Disconnect (blocked while danger flag is active)', function()
     if danger then notify('You are in danger.'); return end
     me:Kick('Disconnected using eishi is the king.')
 end)
+
+section('Bloodlines — mob farm')
+toggle('farm', 'Mob farm: hover + repeated clicks', function(value)
+    if value then
+        assert(farmClick, 'Repeated attacks require the mouse1click function in your client environment.')
+        assert(not flags.fly, 'Disable Fly before enabling Mob Farm.')
+        farmTarget, lastFarmScan, lastFarmClick = nil, -math.huge, -math.huge
+        farmHealthPaused, farmClickFailed = false, false
+        notify('Farm enabled. Hide this menu with RightShift to allow attack clicks. Hovering does not guarantee protection.')
+    else
+        farmTarget = nil
+    end
+end)
+local farmHeight = numberField('Farm height above mob (studs)', 6, 0, 20)
+local farmOffset = numberField('Farm distance behind mob (studs)', 2, 1, 10)
+local farmRange = numberField('Farm target search radius (studs)', 150, 10, 1000)
+local farmInterval = numberField('Attack click interval (seconds)', 0.4, 0.15, 3)
+local farmMinHealth = numberField('Pause farm below health percent', 20, 0, 99)
+local function combatMob(model)
+    if not model or not model:IsA('Model') or not model:IsDescendantOf(workspace)
+        or Players:GetPlayerFromCharacter(model) then return nil end
+    local marker = model:FindFirstChild('NPC') or model:FindFirstChild('Npc')
+    if not marker or not marker:IsA('StringValue') or marker.Value ~= 'Combat' then return nil end
+    local humanoid = model:FindFirstChildOfClass('Humanoid')
+    local root = model:FindFirstChild('HumanoidRootPart') or model.PrimaryPart
+    if humanoid and humanoid.Health > 0 and root and root:IsA('BasePart') then return root end
+    return nil
+end
+local function updateFarm(root, humanoid)
+    if not flags.farm or farmClickFailed or not root or not humanoid or humanoid.Health <= 0 then
+        farmTarget = nil
+        return
+    end
+    local healthPercent = humanoid.Health / math.max(humanoid.MaxHealth, 1) * 100
+    if healthPercent < farmMinHealth() then
+        farmTarget = nil
+        if not farmHealthPaused then
+            notify('Mob farm paused: low health. This does not move you to safety.')
+            farmHealthPaused = true
+        end
+        return
+    end
+    farmHealthPaused = false
+    local targetRoot = combatMob(farmTarget)
+    if targetRoot and (targetRoot.Position - root.Position).Magnitude > farmRange() then targetRoot = nil end
+    if not targetRoot then
+        farmTarget = nil
+        if os.clock() - lastFarmScan < 0.5 then return end
+        lastFarmScan = os.clock()
+        local nearest = farmRange()
+        for _, model in ipairs(workspace:GetChildren()) do
+            local candidate = combatMob(model)
+            if candidate then
+                local distance = (candidate.Position - root.Position).Magnitude
+                if distance <= nearest then
+                    nearest, farmTarget, targetRoot = distance, model, candidate
+                end
+            end
+        end
+    end
+    if not targetRoot then return end
+    local position = (targetRoot.CFrame * CFrame.new(0, 0, farmOffset())).Position
+        + Vector3.new(0, farmHeight(), 0)
+    local facing = Vector3.new(targetRoot.Position.X, position.Y, targetRoot.Position.Z)
+    root.CFrame = CFrame.lookAt(position, facing)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+end
 
 section('Visuals')
 toggle('fog', 'No fog', function(value) if not value then Lighting.FogEnd = original.FogEnd end end)
@@ -514,6 +588,7 @@ end)
 -- Frame work is restricted to movement / lighting; scans use slower intervals.
 connect(Run.PreSimulation, function()
     local char, root, humanoid = character()
+    updateFarm(root, humanoid)
     if flags.noclip and char then
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA('BasePart') then
@@ -562,6 +637,17 @@ connect(Run.Heartbeat, function(delta)
     elapsed = 0
     local _, root = character()
     discoverPlayers()
+    if flags.farm and not farmClickFailed and farmTarget and not farmHealthPaused and combatMob(farmTarget)
+        and root and not frame.Visible and not Input:GetFocusedTextBox()
+        and os.clock() - lastFarmClick >= farmInterval() then
+        lastFarmClick = os.clock()
+        local ok, err = pcall(farmClick)
+        if not ok then
+            farmClickFailed = true
+            farmTarget = nil
+            notify('Mob farm paused: automatic clicking failed: ' .. tostring(err))
+        end
+    end
     if discovery >= 2 then
         discovery = 0
         if flags.npcESP or flags.mobESP or flags.areaESP then discoverESP() end
